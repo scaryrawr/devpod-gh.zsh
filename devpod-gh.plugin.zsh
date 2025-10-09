@@ -38,7 +38,6 @@ _devpod-portforward() {
     if [[ "$event_type" == "port" ]]; then
       local action=$(echo "$line" | jq -r '.action // empty')
       local port=$(echo "$line" | jq -r '.port // empty')
-      local protocol=$(echo "$line" | jq -r '.protocol // empty')
       if [[ "$action" == "bound" && -n "$port" ]]; then
         command devpod ssh -L "${port}" "$selected_space" </dev/null >/dev/null 2>&1 &
         local forward_pid=$!
