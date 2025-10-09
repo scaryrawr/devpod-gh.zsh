@@ -2,6 +2,10 @@
 
 Quality of life plugin.
 
+I like vibe coding and `yolo` mode, this is to make using local devcontainers easier and more seamless for "safer" yolo.
+
+I get GitHub Copilot through work, so getting "automatic" sign in to me is important. I have been learning neovim (and am use to vscode), so auto port forwarding.
+
 This is a simple function wrapper around [devpod](https://github.com/loft-sh/devpod) which checks for `devpod` and [github cli](https://cli.github.com/).
 
 ## Dependencies
@@ -39,13 +43,13 @@ antidote install scaryrawr/devpod-gh.zsh
 
 ### Automatic GitHub Token Injection
 
-When you ssh into a devpod:
+When you ssh into a devpod using `devpod ssh`:
 
 ```zsh
 devpod ssh
 ```
 
-It is equivalent to:
+It the wrapper injects the `GH_TOKEN` environment using `gh auth token`:
 
 ```zsh
 devpod ssh --set-env GH_TOKEN=`gh auth token`
