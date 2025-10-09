@@ -67,7 +67,7 @@ while true; do
     # Extract port from LocalAddress:Port (it's the part after the last colon)
     port="${local_address_port##*:}"
 
-    # Validate port is a number and filter out well-known ports (0-1023)
+    # Validate port is a number and filter to non-problematic range (need to investigate futher)
     if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -gt 2999 ] && [ "$port" -lt 10000 ]; then
       key="${protocol}:${port}"
       current_ports_map["$key"]=1
