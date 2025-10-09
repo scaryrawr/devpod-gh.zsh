@@ -4,7 +4,42 @@ Quality of life plugin.
 
 This is a simple function wrapper around [devpod](https://github.com/loft-sh/devpod) which checks for `devpod` and [github cli](https://cli.github.com/).
 
-What it does, is simply, generate a token when you ssh into a devpod:
+## Dependencies
+
+- [devpod](https://github.com/loft-sh/devpod) - Development container management
+- [github cli](https://cli.github.com/) - GitHub authentication and token generation
+- [gum](https://github.com/charmbracelet/gum) - Interactive workspace selection
+- [jq](https://jqlang.github.io/jq/) - JSON processing for port monitoring
+- `ssh`/`scp` - Remote connection and file transfer
+- `stdbuf` - Unbuffered output handling for port monitoring
+
+## Installation
+
+### Oh My Zsh
+
+Clone this repository into your Oh My Zsh custom plugins directory:
+
+```zsh
+git clone https://github.com/scaryrawr/devpod-gh.zsh ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/devpod-gh
+```
+
+Then add `devpod-gh` to your plugins array in `~/.zshrc`:
+
+```zsh
+plugins=(... devpod-gh)
+```
+
+### Antidote
+
+```
+antidote install scaryrawr/devpod-gh.zsh
+```
+
+## Features
+
+### Automatic GitHub Token Injection
+
+When you ssh into a devpod:
 
 ```zsh
 devpod ssh
@@ -20,4 +55,8 @@ This enables things like [github copilot cli](https://github.com/features/copilo
 
 It magically enables the [github cli](https://github.com/devcontainers/features/tree/main/src/github-cli) feature.
 
-I think you can do something similar with the `remoteEnv` in [devcontainer.json](https://containers.dev/implementors/json_reference/), but if you have multiple GitHub accounts, you need to juggle the environment variable anyways before calling devpod I believe.
+### Automatic Port Forwarding
+
+The plugin automatically monitors and forwards ports that are bound inside your devpod workspace. When an application starts listening on a port inside the devpod, it will be automatically forwarded to your local machine on the same port.
+
+This uses a background port monitoring process that watches for port binding events and establishes SSH tunnels as needed. The port forwarding is cleaned up automatically when you disconnect.
