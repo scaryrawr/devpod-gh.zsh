@@ -1,5 +1,14 @@
 #!/usr/bin/env zsh
 
+# Helper to kill a process gracefully then forcefully if needed
+_kill_process() {
+  local pid="$1"
+  [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null && return
+  kill "$pid" 2>/dev/null
+  sleep 0.1
+  kill -9 "$pid" 2>/dev/null
+}
+
 # Internal function to manage automatic port forwarding for a devpod workspace (independent of gum)
 _devpod-portforward() {
   local selected_space="$1"
@@ -19,20 +28,24 @@ _devpod-portforward() {
   scp -q "$script_path" "${devpod_host}:~/" 2>/dev/null
   
   typeset -gA DEVPOD_PORT_FORWARD_PIDS
+  local ssh_monitor_pid=""
+  
   cleanup_port_forwarding() {
     for pid in ${DEVPOD_PORT_FORWARD_PIDS[@]}; do
-      kill "$pid" 2>/dev/null
+      _kill_process "$pid"
     done
+    DEVPOD_PORT_FORWARD_PIDS=()
+    
+    [[ -n "$ssh_monitor_pid" ]] && kill -- -"$ssh_monitor_pid" 2>/dev/null
+    exec 3<&- 2>/dev/null
   }
-  trap cleanup_port_forwarding EXIT
+  trap cleanup_port_forwarding EXIT INT TERM
   
   echo "[devpod-gh] Port monitoring started for workspace: ${selected_space}" >&2
   echo "[devpod-gh] Starting SSH monitoring loop..." >&2
   
-  # Use unbuffered output and explicit exec to avoid subshell issues
-  # Redirect stdin from /dev/null to prevent SSH from waiting for input
-  exec 3< <(command devpod ssh --command 'exec stdbuf -oL bash ~/portmonitor.sh' "$selected_space" </dev/null 2>&1)
-  while IFS= read -r line <&3; do
+  # Start SSH monitoring in background and track its PID
+  command devpod ssh --command 'exec stdbuf -oL bash ~/portmonitor.sh' "$selected_space" </dev/null 2>&1 | while IFS= read -r line; do
     echo "[devpod-gh] Received: $line" >&2
     local event_type=$(echo "$line" | jq -r '.type // empty')
     if [[ "$event_type" == "port" ]]; then
@@ -41,73 +54,60 @@ _devpod-portforward() {
       if [[ "$action" == "bound" && -n "$port" ]]; then
         command devpod ssh -L "${port}" "$selected_space" </dev/null >/dev/null 2>&1 &
         local forward_pid=$!
-        disown
         DEVPOD_PORT_FORWARD_PIDS["${port}"]=$forward_pid
         echo "[devpod-gh] Port forwarding started: ${port} (PID: ${forward_pid})" >&2
       elif [[ "$action" == "unbound" && -n "$port" ]]; then
         local forward_pid=${DEVPOD_PORT_FORWARD_PIDS["${port}"]}
         if [[ -n "$forward_pid" ]]; then
-          kill "$forward_pid" 2>/dev/null
+          _kill_process "$forward_pid"
           unset "DEVPOD_PORT_FORWARD_PIDS[${port}]"
           echo "[devpod-gh] Port forwarding stopped: ${port}" >&2
         fi
       fi
     fi
-  done
-  exec 3<&-
+  done &
+  ssh_monitor_pid=$!
+  
+  wait "$ssh_monitor_pid" 2>/dev/null
 }
 
 devpod() {
   local args=("$@")
+  local args_str=" ${args[*]} "
   
-  # Skip gum selection if --help or -h is present, or non-interactive SSH flags like -L, -R
-  if [[ " ${args[*]} " == *" --help "* ]] || [[ " ${args[*]} " == *" -h "* ]] || \
-     [[ " ${args[*]} " == *" -L "* ]] || [[ " ${args[*]} " == *" --forward-local "* ]] || \
-     [[ " ${args[*]} " == *" -R "* ]] || [[ " ${args[*]} " == *" --forward-remote "* ]] || \
-     [[ " ${args[*]} " == *" -D "* ]] || [[ " ${args[*]} " == *" --forward-socks "* ]] || \
-     [[ " ${args[*]} " == *" -W "* ]] || [[ " ${args[*]} " == *" --forward-stdio "* ]] || \
-     [[ " ${args[*]} " == *" --command "* ]]; then
+  # Skip wrapper for help, non-interactive SSH flags, or non-ssh commands
+  if [[ "$args_str" =~ " (-h|--help|--command|-[LRDW]|--forward-(local|remote|socks|stdio)) " ]] || \
+     [[ "$args_str" != *" ssh "* ]]; then
     command devpod "${args[@]}"
     return
   fi
   
-  # Skip gum selection if not ssh command
-  if [[ " ${args[*]} " != *" ssh "* ]]; then
-    command devpod "${args[@]}"
-    return
-  fi
+  local spaces=$(command devpod ls --provider docker --output json | jq -r '.[].id')
+  args+=(--set-env GH_TOKEN=$(gh auth token))
   
-  local spaces=`command devpod ls --provider docker --output json | jq -r '.[].id'`
-  
-  args+=(--set-env)
-  args+=(GH_TOKEN=$(gh auth token))
-  
-  # Check if any space is already included in args
+  # Check if workspace already specified in args
   local selected_space=""
-  local space_found=0
   for space in ${(f)spaces}; do
-    if [[ " ${args[*]} " == *" $space "* ]]; then
-      space_found=1
+    if [[ "$args_str" == *" $space "* ]]; then
       selected_space="$space"
       break
     fi
   done
   
-  # If no space found in args, prompt with gum
-  if [[ $space_found -eq 0 && -n "$spaces" ]]; then
+  # Prompt with gum if no workspace found
+  if [[ -z "$selected_space" && -n "$spaces" ]]; then
     selected_space=$(echo "$spaces" | gum choose --header 'Please select a workspace from the list below')
-    if [[ -n "$selected_space" ]]; then
-      args+=("$selected_space")
-    else
-      return
-    fi
+    [[ -n "$selected_space" ]] && args+=("$selected_space") || return
   fi
   
-  # Copy and start portmonitor.sh on the devpod if we have a selected_space
+  # Start port forwarding if we have a workspace
   if [[ -n "$selected_space" ]]; then
     local _pf_log=$(mktemp -t devpod-portforward.${selected_space}.XXXXXX.log)
-    _devpod-portforward "$selected_space" >"$_pf_log" 2>&1 &!
-    echo "[devpod-gh] Port forwarding monitor started in background (log: $_pf_log)" >&2
+    _devpod-portforward "$selected_space" >"$_pf_log" 2>&1 &
+    local _pf_pid=$!
+    
+    trap "[[ -n '$_pf_pid' ]] && kill -- -'$_pf_pid' 2>/dev/null" EXIT INT TERM
+    echo "[devpod-gh] Port forwarding monitor started in background (PID: $_pf_pid, log: $_pf_log)" >&2
   fi
   
   command devpod "${args[@]}"
