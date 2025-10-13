@@ -106,7 +106,7 @@ devpod() {
     _devpod-portforward "$selected_space" >"$_pf_log" 2>&1 &
     local _pf_pid=$!
     
-    trap "[[ -n '$_pf_pid' ]] && kill -- -'$_pf_pid' 2>/dev/null" EXIT INT TERM
+    trap "[[ -n \"\$_pf_pid\" ]] && kill \"\$_pf_pid\" 2>/dev/null" EXIT INT TERM
     echo "[devpod-gh] Port forwarding monitor started in background (PID: $_pf_pid, log: $_pf_log)" >&2
   fi
   
