@@ -136,8 +136,11 @@ devpod() {
     _devpod-portreverse "$selected_space"
     
     cleanup_devpod_session() {
-      # Cleanup port forwarding
-      [[ -n "$_pf_pid" ]] && kill "$_pf_pid" 2>/dev/null
+      # Cleanup port forwarding process and all its children
+      if [[ -n "$_pf_pid" ]]; then
+        kill -- -"$_pf_pid" 2>/dev/null
+        wait "$_pf_pid" 2>/dev/null
+      fi
       
       # Cleanup reverse port forwarding
       if [[ -n "${DEVPOD_REVERSE_PORT_PIDS}" ]]; then
@@ -146,6 +149,15 @@ devpod() {
         done
         DEVPOD_REVERSE_PORT_PIDS=()
       fi
+      
+      # Cleanup any remaining background jobs
+      local bg_jobs=(${${(v)jobstates##*:*:}%=*})
+      for job_pid in $bg_jobs; do
+        kill "$job_pid" 2>/dev/null
+      done
+      
+      # Remove temp log file
+      [[ -f "$_pf_log" ]] && rm -f "$_pf_log"
     }
     
     trap cleanup_devpod_session EXIT INT TERM
@@ -153,4 +165,7 @@ devpod() {
   fi
   
   command devpod "${args[@]}"
+  
+  # Ensure cleanup runs after SSH session exits
+  cleanup_devpod_session
 }
