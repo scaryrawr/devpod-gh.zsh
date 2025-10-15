@@ -9,6 +9,32 @@ _kill_process() {
   kill -9 "$pid" 2>/dev/null
 }
 
+_devpod-portreverse() {
+  local selected_space="$1"
+  if [[ -z "$selected_space" ]]; then
+    echo "Usage: _devpod-portreverse <workspace-name>" >&2
+    return 1
+  fi
+  
+  typeset -gA DEVPOD_REVERSE_PORT_PIDS
+  
+  # Check if port 1234 is listening locally
+  if lsof -iTCP:1234 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "[devpod-gh] Local port 1234 is listening, setting up reverse proxy..." >&2
+    command devpod ssh -R 1234 "$selected_space" </dev/null >/dev/null 2>&1 &
+    DEVPOD_REVERSE_PORT_PIDS[1234]=$!
+    echo "[devpod-gh] Reverse proxy started for port 1234 (PID: ${DEVPOD_REVERSE_PORT_PIDS[1234]})" >&2
+  fi
+  
+  # Check if port 11434 is listening locally
+  if lsof -iTCP:11434 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "[devpod-gh] Local port 11434 is listening, setting up reverse proxy..." >&2
+    command devpod ssh -R 11434 "$selected_space" </dev/null >/dev/null 2>&1 &
+    DEVPOD_REVERSE_PORT_PIDS[11434]=$!
+    echo "[devpod-gh] Reverse proxy started for port 11434 (PID: ${DEVPOD_REVERSE_PORT_PIDS[11434]})" >&2
+  fi
+}
+
 # Internal function to manage automatic port forwarding for a devpod workspace (independent of gum)
 _devpod-portforward() {
   local selected_space="$1"
@@ -106,9 +132,40 @@ devpod() {
     _devpod-portforward "$selected_space" >"$_pf_log" 2>&1 &
     local _pf_pid=$!
     
-    trap "[[ -n \"\$_pf_pid\" ]] && kill \"\$_pf_pid\" 2>/dev/null" EXIT INT TERM
+    # Start reverse port forwarding
+    _devpod-portreverse "$selected_space"
+    
+    cleanup_devpod_session() {
+      # Cleanup port forwarding process and all its children
+      if [[ -n "$_pf_pid" ]]; then
+        kill -- -"$_pf_pid" 2>/dev/null
+        wait "$_pf_pid" 2>/dev/null
+      fi
+      
+      # Cleanup reverse port forwarding
+      if [[ -n "${DEVPOD_REVERSE_PORT_PIDS}" ]]; then
+        for pid in ${DEVPOD_REVERSE_PORT_PIDS[@]}; do
+          _kill_process "$pid"
+        done
+        DEVPOD_REVERSE_PORT_PIDS=()
+      fi
+      
+      # Cleanup any remaining background jobs
+      local bg_jobs=(${${(v)jobstates##*:*:}%=*})
+      for job_pid in $bg_jobs; do
+        kill "$job_pid" 2>/dev/null
+      done
+      
+      # Remove temp log file
+      [[ -f "$_pf_log" ]] && rm -f "$_pf_log"
+    }
+    
+    trap cleanup_devpod_session EXIT INT TERM
     echo "[devpod-gh] Port forwarding monitor started in background (PID: $_pf_pid, log: $_pf_log)" >&2
   fi
   
   command devpod "${args[@]}"
+  
+  # Ensure cleanup runs after SSH session exits
+  cleanup_devpod_session
 }
