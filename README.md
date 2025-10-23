@@ -39,6 +39,21 @@ plugins=(... devpod-gh)
 antidote install scaryrawr/devpod-gh.zsh
 ```
 
+## Configuration
+
+### SSH ControlMaster (Required for optimal performance)
+
+Configure SSH ControlMaster in your `~/.ssh/config` for optimal port forwarding performance:
+
+```ssh-config
+Host *
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%C
+  ControlPersist 10m
+```
+
+This enables connection multiplexing, which allows multiple SSH connections to share a single network connection. This significantly speeds up establishing new port forwards by avoiding repeated SSH handshakes and authentication.
+
 ## Features
 
 ### Automatic GitHub Token Injection
@@ -49,18 +64,28 @@ When you ssh into a devpod using `devpod ssh`:
 devpod ssh
 ```
 
-It the wrapper injects the `GH_TOKEN` environment using `gh auth token`:
+The wrapper automatically injects environment variables:
+
+- **GH_TOKEN**: Using `gh auth token`
+- **GH_COPILOT_TOKEN**: Automatically extracted from `~/.config/github-copilot/apps.json` if available
 
 ```zsh
-devpod ssh --set-env GH_TOKEN=`gh auth token`
+devpod ssh --set-env GH_TOKEN=`gh auth token` --set-env GH_COPILOT_TOKEN=<token>
 ```
 
-This enables things like [github copilot cli](https://github.com/features/copilot/cli/) to just work... automagically, in devpods.
-
-It magically enables the [github cli](https://github.com/devcontainers/features/tree/main/src/github-cli) feature.
+This enables things like [github copilot cli](https://github.com/features/copilot/cli/) and [github cli](https://github.com/devcontainers/features/tree/main/src/github-cli) to just work... automagically, in devpods.
 
 ### Automatic Port Forwarding
 
 The plugin automatically monitors and forwards ports that are bound inside your devpod workspace. When an application starts listening on a port inside the devpod, it will be automatically forwarded to your local machine on the same port.
 
 This uses a background port monitoring process that watches for port binding events and establishes SSH tunnels as needed. The port forwarding is cleaned up automatically when you disconnect.
+
+### Automatic Reverse Port Forwarding (Self-hosted LLMs)
+
+The plugin automatically detects and reverse-forwards local LLM services to your devpod:
+
+- **Port 1234**: LM Studio
+- **Port 11434**: Ollama
+
+When these services are running locally, they become accessible inside your devpod, allowing you to use self-hosted AI models in your remote development environment.
