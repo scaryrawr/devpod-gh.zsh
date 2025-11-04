@@ -16,20 +16,25 @@ _devpod-portreverse() {
     return 1
   fi
   
+  # Ensure workspace is up
+  echo "[devpod-gh] Ensuring workspace is up..." >&2
+  command devpod up --open-ide false "$selected_space" >/dev/null 2>&1
+  
+  local devpod_host="${selected_space}.devpod"
   typeset -gA DEVPOD_REVERSE_PORT_PIDS
   
-  # Check if port 1234 is listening locally
+  # Check if port 1234 is listening locally (LM Studio)
   if lsof -iTCP:1234 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "[devpod-gh] Local port 1234 is listening, setting up reverse proxy..." >&2
-    command devpod ssh -R 1234 "$selected_space" </dev/null >/dev/null 2>&1 &
+    echo "[devpod-gh] Reverse forwarding lm studio..." >&2
+    ssh -R 1234:localhost:1234 "$devpod_host" -N </dev/null >/dev/null 2>&1 &
     DEVPOD_REVERSE_PORT_PIDS[1234]=$!
     echo "[devpod-gh] Reverse proxy started for port 1234 (PID: ${DEVPOD_REVERSE_PORT_PIDS[1234]})" >&2
   fi
   
-  # Check if port 11434 is listening locally
+  # Check if port 11434 is listening locally (Ollama)
   if lsof -iTCP:11434 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo "[devpod-gh] Local port 11434 is listening, setting up reverse proxy..." >&2
-    command devpod ssh -R 11434 "$selected_space" </dev/null >/dev/null 2>&1 &
+    echo "[devpod-gh] Reverse forwarding ollama..." >&2
+    ssh -R 11434:localhost:11434 "$devpod_host" -N </dev/null >/dev/null 2>&1 &
     DEVPOD_REVERSE_PORT_PIDS[11434]=$!
     echo "[devpod-gh] Reverse proxy started for port 11434 (PID: ${DEVPOD_REVERSE_PORT_PIDS[11434]})" >&2
   fi
@@ -51,7 +56,7 @@ _devpod-portforward() {
   local script_path="${${(%):-%x}:A:h}/portmonitor.sh"
   local devpod_host="${selected_space}.devpod"
   echo "[devpod-gh] Copying portmonitor script..." >&2
-  scp -q "$script_path" "${devpod_host}:~/" 2>/dev/null
+  ssh "$devpod_host" "cat > ~/portmonitor.sh" < "$script_path" 2>/dev/null
   
   typeset -gA DEVPOD_PORT_FORWARD_PIDS
   local ssh_monitor_pid=""
@@ -71,14 +76,14 @@ _devpod-portforward() {
   echo "[devpod-gh] Starting SSH monitoring loop..." >&2
   
   # Start SSH monitoring in background and track its PID
-  command devpod ssh --command 'exec stdbuf -oL bash ~/portmonitor.sh' "$selected_space" </dev/null 2>&1 | while IFS= read -r line; do
+  ssh "$devpod_host" 'exec stdbuf -oL bash ~/portmonitor.sh' </dev/null 2>&1 | while IFS= read -r line; do
     echo "[devpod-gh] Received: $line" >&2
     local event_type=$(echo "$line" | jq -r '.type // empty')
     if [[ "$event_type" == "port" ]]; then
       local action=$(echo "$line" | jq -r '.action // empty')
       local port=$(echo "$line" | jq -r '.port // empty')
       if [[ "$action" == "bound" && -n "$port" ]]; then
-        command devpod ssh -L "${port}" "$selected_space" </dev/null >/dev/null 2>&1 &
+        ssh -L "${port}:localhost:${port}" "$devpod_host" -N </dev/null >/dev/null 2>&1 &
         local forward_pid=$!
         DEVPOD_PORT_FORWARD_PIDS["${port}"]=$forward_pid
         echo "[devpod-gh] Port forwarding started: ${port} (PID: ${forward_pid})" >&2
@@ -111,6 +116,15 @@ devpod() {
   local spaces=$(command devpod ls --provider docker --output json | jq -r '.[].id')
   args+=(--set-env GH_TOKEN=$(gh auth token))
   
+  # Add GitHub Copilot token if available
+  local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  if [[ -f "$config_home/github-copilot/apps.json" ]]; then
+    local copilot_token=$(jq -r '."github.com:Iv1.b507a08c87ecfe98".oauth_token // empty' "$config_home/github-copilot/apps.json" 2>/dev/null)
+    if [[ -n "$copilot_token" ]]; then
+      args+=(--set-env GH_COPILOT_TOKEN="$copilot_token")
+    fi
+  fi
+  
   # Check if workspace already specified in args
   local selected_space=""
   for space in ${(f)spaces}; do
@@ -129,11 +143,21 @@ devpod() {
   # Start port forwarding if we have a workspace
   if [[ -n "$selected_space" ]]; then
     local _pf_log=$(mktemp -t devpod-portforward.${selected_space}.XXXXXX.log)
+    local _rf_log=$(mktemp -t devpod-reverseforward.${selected_space}.XXXXXX.log)
+    local devpod_host="${selected_space}.devpod"
+    
+    # Start SSH ControlMaster for multiplexing
+    ssh -MNf "$devpod_host" 2>/dev/null
+    
+    echo "[devpod-gh] Starting port forwarding monitor (log: $_pf_log)" >&2
+    echo "[devpod-gh] Starting reverse forwarding monitor (log: $_rf_log)" >&2
+    
     _devpod-portforward "$selected_space" >"$_pf_log" 2>&1 &
     local _pf_pid=$!
     
     # Start reverse port forwarding
-    _devpod-portreverse "$selected_space"
+    _devpod-portreverse "$selected_space" >"$_rf_log" 2>&1 &
+    local _rf_pid=$!
     
     cleanup_devpod_session() {
       # Cleanup port forwarding process and all its children
@@ -142,7 +166,13 @@ devpod() {
         wait "$_pf_pid" 2>/dev/null
       fi
       
-      # Cleanup reverse port forwarding
+      # Cleanup reverse port forwarding process
+      if [[ -n "$_rf_pid" ]]; then
+        kill -- -"$_rf_pid" 2>/dev/null
+        wait "$_rf_pid" 2>/dev/null
+      fi
+      
+      # Cleanup reverse port forwarding PIDs
       if [[ -n "${DEVPOD_REVERSE_PORT_PIDS}" ]]; then
         for pid in ${DEVPOD_REVERSE_PORT_PIDS[@]}; do
           _kill_process "$pid"
@@ -156,12 +186,17 @@ devpod() {
         kill "$job_pid" 2>/dev/null
       done
       
-      # Remove temp log file
+      # Exit SSH ControlMaster connection
+      if [[ -n "$selected_space" ]]; then
+        ssh -O exit "${selected_space}.devpod" 2>/dev/null
+      fi
+      
+      # Remove temp log files
       [[ -f "$_pf_log" ]] && rm -f "$_pf_log"
+      [[ -f "$_rf_log" ]] && rm -f "$_rf_log"
     }
     
     trap cleanup_devpod_session EXIT INT TERM
-    echo "[devpod-gh] Port forwarding monitor started in background (PID: $_pf_pid, log: $_pf_log)" >&2
   fi
   
   command devpod "${args[@]}"
